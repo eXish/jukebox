@@ -1,10 +1,10 @@
-﻿using UnityEngine;
+﻿using System;
 using System.Collections.Generic;
 using System.IO;
-using UnityEditor;
 using System.Linq;
-using System;
 using System.Reflection;
+using UnityEditor;
+using UnityEngine;
 
 /// <summary>
 ///
@@ -62,6 +62,11 @@ public class AssetBundler
     /// List of MonoScripts modified during the bundling process that need to be restored after.
     /// </summary>
     private List<string> scriptPathsToRestore = new List<string>();
+
+    /// <summary>
+    /// A variable for holding the current BuildTarget, for Mac compatibility.
+    /// </summary>
+    BuildTarget target = BuildTarget.StandaloneWindows;
     #endregion
 
     [MenuItem("Keep Talking ModKit/Build AssetBundle _F6", priority = 10)]
@@ -92,6 +97,7 @@ public class AssetBundler
 
         bundler.assemblyName = ModConfig.ID;
         bundler.outputFolder = ModConfig.OutputFolder + "/" + bundler.assemblyName;
+        if (Application.platform == RuntimePlatform.OSXEditor) bundler.target = BuildTarget.StandaloneOSX;
 
         bool success = false;
 
@@ -190,7 +196,7 @@ public class AssetBundler
 
         //modify the csproj (if needed)
         var csproj = File.ReadAllText("ktanemodkit.CSharp.csproj");
-        csproj = csproj.Replace("<AssemblyName>Assembly-CSharp</AssemblyName>", "<AssemblyName>"+ assemblyName + "</AssemblyName>");
+        csproj = csproj.Replace("<AssemblyName>Assembly-CSharp</AssemblyName>", "<AssemblyName>" + assemblyName + "</AssemblyName>");
         File.WriteAllText("modkithelper.CSharp.csproj", csproj);
 
         string path = "modkithelper.CSharp.csproj";
@@ -239,15 +245,15 @@ public class AssetBundler
             .ToList();
 
         string unityAssembliesLocation;
-        switch (System.Environment.OSVersion.Platform)
+        switch (Application.platform)
         {
-            case PlatformID.MacOSX:
-            case PlatformID.Unix:
-                unityAssembliesLocation = EditorApplication.applicationPath.Replace("Unity.app", "Unity.app/Contents/Managed/");
+            case RuntimePlatform.OSXEditor:
+                unityAssembliesLocation = EditorApplication.applicationPath + "/Contents/Managed/";
                 break;
-            case PlatformID.Win32NT:
+            case RuntimePlatform.LinuxEditor:
+            case RuntimePlatform.WindowsEditor:
             default:
-                unityAssembliesLocation = EditorApplication.applicationPath.Replace("Unity.exe", "Data/Managed/");
+                unityAssembliesLocation = Path.Combine(Path.GetDirectoryName(EditorApplication.applicationPath), @"Data/Managed/");
                 break;
         }
 
@@ -265,7 +271,7 @@ public class AssetBundler
         int apiCompatibilityLevel = 1; //NET_2_0 compatibility level is enum value 1
         Assembly assembly = Assembly.GetAssembly(typeof(MonoScript));
         var monoIslandType = assembly.GetType("UnityEditor.Scripting.MonoIsland");
-        object monoIsland = Activator.CreateInstance(monoIslandType, BuildTarget.StandaloneOSXUniversal, apiCompatibilityLevel, scriptArray, referenceArray, defineArray, outputFilename);
+        object monoIsland = Activator.CreateInstance(monoIslandType, target, apiCompatibilityLevel, scriptArray, referenceArray, defineArray, outputFilename);
 
         //MonoCompiler itself
         var monoCompilerType = assembly.GetType("UnityEditor.Scripting.Compilers.MonoCSharpCompiler");
@@ -421,9 +427,9 @@ public class AssetBundler
         //not be accessible within the asset bundle. Unity has deprecated this flag claiming it is now always active, but due to a bug
         //we must still include it (and ignore the warning).
         BuildPipeline.BuildAssetBundles(
-           TEMP_BUILD_FOLDER,
-           BuildAssetBundleOptions.DeterministicAssetBundle | BuildAssetBundleOptions.CollectDependencies,
-           BuildTarget.StandaloneOSXUniversal);
+            TEMP_BUILD_FOLDER,
+            BuildAssetBundleOptions.DeterministicAssetBundle | BuildAssetBundleOptions.CollectDependencies,
+            target);
 #pragma warning restore 618
 
         //We are only interested in the BUNDLE_FILENAME bundle (and not the extra AssetBundle or the manifest files
@@ -440,10 +446,24 @@ public class AssetBundler
     {
         File.WriteAllText(outputFolder + "/modInfo.json", ModConfig.Instance.ToJson());
 
-        if(ModConfig.PreviewImage != null)
+        if (ModConfig.PreviewImage != null)
         {
-            byte[] bytes = ModConfig.PreviewImage.EncodeToPNG();
-            File.WriteAllBytes(outputFolder + "/previewImage.png", bytes);
+            string previewImageAssetPath = AssetDatabase.GetAssetPath(ModConfig.PreviewImage);
+
+            if (!string.IsNullOrEmpty(previewImageAssetPath))
+            {
+                TextureImporter importer = AssetImporter.GetAtPath(previewImageAssetPath) as TextureImporter;
+
+                if (!importer.isReadable || importer.textureCompression != TextureImporterCompression.Uncompressed)
+                {
+                    importer.isReadable = true;
+                    importer.textureCompression = TextureImporterCompression.Uncompressed;
+                    importer.SaveAndReimport();
+                }
+
+                byte[] bytes = ModConfig.PreviewImage.EncodeToPNG();
+                File.WriteAllBytes(outputFolder + "/previewImage.png", bytes);
+            }
         }
     }
 
@@ -452,7 +472,7 @@ public class AssetBundler
     /// </summary>
     protected void CopyModSettings()
     {
-        if(File.Exists("Assets/modSettings.json"))
+        if (File.Exists("Assets/modSettings.json"))
         {
             File.Copy("Assets/modSettings.json", outputFolder + "/modSettings.json");
         }
@@ -462,7 +482,7 @@ public class AssetBundler
     /// </summary>
     protected void CopyManual()
     {
-        if(Directory.Exists("Manual/pdfs"))
+        if (Directory.Exists("Manual/pdfs"))
         {
             DirectoryCopyPDFs("Manual/pdfs", outputFolder + "/Manual", true);
         }
@@ -495,7 +515,7 @@ public class AssetBundler
         foreach (FileInfo file in files)
         {
             string temppath = Path.Combine(destDirName, file.Name);
-            if(file.Extension.ToLower() == ".pdf")
+            if (file.Extension.ToLower() == ".pdf")
             {
                 file.CopyTo(temppath, false);
             }
@@ -599,38 +619,44 @@ public class AssetBundler
             };
 
         string[] prefabsGUIDs = AssetDatabase.FindAssets("t: prefab");
-        foreach(string prefabGUID in prefabsGUIDs)
+        foreach (string prefabGUID in prefabsGUIDs)
         {
             string path = AssetDatabase.GUIDToAssetPath(prefabGUID);
             GameObject go = AssetDatabase.LoadAssetAtPath<GameObject>(path);
-            if(go == null)
+            if (go == null)
             {
                 continue;
             }
-            foreach(Renderer renderer in go.GetComponentsInChildren<Renderer>())
+            foreach (Renderer renderer in go.GetComponentsInChildren<Renderer>())
             {
-                if(renderer.sharedMaterials != null && renderer.sharedMaterials.Length > 0)
+                if (renderer.sharedMaterials != null && renderer.sharedMaterials.Length > 0)
                 {
-                    if(renderer.gameObject.GetComponent<KMMaterialInfo>() == null)
+                    if (renderer.gameObject.GetComponent<KMMaterialInfo>() == null)
                     {
                         renderer.gameObject.AddComponent<KMMaterialInfo>();
                     }
                     KMMaterialInfo materialInfo = renderer.gameObject.GetComponent<KMMaterialInfo>();
                     materialInfo.ShaderNames = new List<string>();
-                    foreach(Material material in renderer.sharedMaterials)
+                    foreach (Material material in renderer.sharedMaterials)
                     {
-                        if (material == null || material.shader == null)
+                        if (material == null)
                         {
-                            continue;
+                            var obj = renderer.transform;
+                            var str = new List<string>();
+                            while (obj != null)
+                            {
+                                str.Add(obj.gameObject.name);
+                                obj = obj.parent;
+                            }
+                            Debug.LogErrorFormat("There is an unassigned material on the following object: {0}", string.Join(" > ", str.ToArray()));
                         }
-                        
                         materialInfo.ShaderNames.Add(material.shader.name);
 
-                        if(material.shader.name == "Standard")
+                        if (material.shader.name == "Standard")
                         {
                             Debug.LogWarning(string.Format("Use of Standard shader in object {0}. Standard shader should be avoided as it will cause your mod to break in future versions of the game.", renderer.gameObject));
                         }
-                        else if(!supportedShaders.Contains(material.shader.name))
+                        else if (!supportedShaders.Contains(material.shader.name))
                         {
                             Debug.LogWarning(string.Format("Use of custom shader {0} in object {1}. Use of custom shaders will break mod compatibility on game update requiring rebuild. Recommend using only supported shaders.", material.shader.name, renderer.gameObject));
                         }
